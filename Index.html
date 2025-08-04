@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<title>Домашняя бухгалтерия</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+ :root{--accent:#007bff;--bg:#f7f7f7;--card:#fff;--text:#333;--border:#e0e0e0}
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+body{background:var(--bg);color:var(--text)}
+nav,.sub{display:flex;background:var(--card);border-bottom:1px solid var(--border)}
+nav button,.sub button{flex:1;padding:14px;border:none;background:none;cursor:pointer;font-weight:600}
+nav button.active,.sub button.active{color:var(--accent);border-bottom:2px solid var(--accent)}
+main{padding:20px;max-width:800px;margin:auto}
+section{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:20px}
+form{display:grid;gap:12px}
+input,select,button{padding:8px 10px;border:1px solid var(--border);border-radius:4px;font-size:1rem}
+button[type=submit]{background:var(--accent);color:#fff;cursor:pointer}
+ul{list-style:none}li{padding:6px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+canvas{width:100%!important;height:300px!important}
+.inline-form input{margin-right:6px}
+.actions button{margin-left:4px;background:none;border:1px solid var(--border);cursor:pointer;font-size:.8rem;padding:2px 6px;border-radius:3px}
+.actions .save{background:#28a745;color:#fff;border-color:#28a745}
+.actions .cancel{background:#6c757d;color:#fff;border-color:#6c757d}
+</style>
+</head>
+<body>
+
+<nav>
+  <button data-tab="home" class="active">Главная</button>
+  <button data-tab="expenses">Расходы</button>
+  <button data-tab="incomes">Доходы</button>
+  <button data-tab="work">Работа</button>
+</nav>
+
+<main id="content"></main>
+
+<script type="module">
+/* ============= IndexedDB ============= */
+const DB_NAME='finance', DB_VER=2;
+async function openDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(DB_NAME,DB_VER);
+    req.onerror=()=>reject(req.error);
+    req.onsuccess=()=>resolve(req.result);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      ['expenses','incomes','positions','worklog'].forEach(x=>{
+        if(!db.objectStoreNames.contains(x)) db.createObjectStore(x,{keyPath:'id',autoIncrement:true});
+      });
+    };
+  });
+}
+async function add(store,obj){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite'),q=tx.objectStore(store).add(obj);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error);});}
+async function put(store,obj){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite'),q=tx.objectStore(store).put(obj);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error);});}
+async function getAll(store){const db=await openDB();return new Promise((res,rej)=>{const q=db.transaction(store,'readonly').objectStore(store).getAll();q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error);});}
+async function del(store,id){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite'),q=tx.objectStore(store).delete(id);q.onsuccess=res;q.onerror=rej;});}
+
+/* ============= Chart.js ============= */
+import Chart from 'https://cdn.jsdelivr.net/npm/chart.js@4/auto/+esm';
+function pie(ctx,labels,data){new Chart(ctx,{type:'pie',data:{labels,datasets:[{data,backgroundColor:['#28a745','#dc3545']}]},options:{responsive:true,maintainAspectRatio:false}});}
+function bar(ctx,labels,data){new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'₽',data,backgroundColor:'#007bff'}]},options:{responsive:true,maintainAspectRatio:false}});}
+
+/* ============= Роутер ============= */
+const nav=document.querySelector('nav'), content=document.getElementById('content');
+nav.addEventListener('click',e=>{
+  if(e.target.tagName!=='BUTTON') return;
+  [...nav.children].forEach(b=>b.classList.remove('active'));
+  e.target.classList.add('active');
+  render(e.target.dataset.tab);
+});
+const sum=a=>a.reduce((s,x)=>s+x.amount,0);
+
+/* ============ Рендер вкладок ============ */
+const tabs={
+  async home(r){
+    const [inc,exp]=await Promise.all([getAll('incomes'),getAll('expenses')]);
+    r.innerHTML=`
+      <section><h2>Доходы / Расходы</h2><canvas id="pie"></canvas></section>
+      <section><h2>Доходы</h2><ul>${inc.map(i=>`<li>${i.amount}₽ – ${i.source} (${i.date})<span class="actions"><button onclick="editIncome(${i.id})">✏</button><button onclick="remove('incomes',${i.id})">✖</button></span></li>`).join('')}</ul></section>
+      <section><h2>Расходы</h2><ul>${exp.map(e=>`<li>${e.amount}₽ – ${e.target} (${e.category}, ${e.date})<span class="actions"><button onclick="editExpense(${e.id})">✏</button><button onclick="remove('expenses',${e.id})">✖</button></span></li>`).join('')}</ul></section>`;
+    pie(document.getElementById('pie'),['Доходы','Расходы'],[sum(inc),sum(exp)]);
+  },
+
+  async expenses(root){
+    root.innerHTML=`
+      <section><h2>Добавить расход</h2><form id="expForm">
+        <input name="amount" type="number" placeholder="Сумма" required/>
+        <input name="date" type="date" required/>
+        <input name="target" placeholder="Куда потрачено" required/>
+        <select name="category"><option value="Супермаркеты">Супермаркеты</option><option value="Развлечения">Развлечения</option><option value="Транспорт">Транспорт</option><option value="Такси">Такси</option><option value="Маркетплейсы">Маркетплейсы</option><option value="Долги">Долги</option><option value="custom">Своя категория…</option></select>
+        <input name="custom" placeholder="Своя категория" style="display:none"/>
+        <button>Добавить</button>
+      </form></section>
+      <section><h2>История</h2><ul id="expList"></ul></section>`;
+    const form=root.querySelector('#expForm'), list=root.querySelector('#expList');
+    form.category.addEventListener('change',e=>form.custom.style.display=e.target.value==='custom'?'block':'none');
+    form.addEventListener('submit',async e=>{e.preventDefault();const {amount,date,target,category,custom}=form.elements;await add('expenses',{amount:+amount.value,date:date.value,target:target.value,category:category.value==='custom'?custom.value:category.value});form.reset(); refresh();});
+    async function refresh(){list.innerHTML=(await getAll('expenses')).map(e=>`<li>${e.amount}₽ – ${e.target} (${e.category}, ${e.date})<span class="actions"><button onclick="editExpense(${e.id})">✏</button><button onclick="remove('expenses',${e.id})">✖</button></span></li>`).join('');}
+    refresh();
+  },
+
+  async incomes(root){
+    root.innerHTML=`
+      <section><h2>Добавить доход</h2><form id="incForm">
+        <input name="amount" type="number" placeholder="Сумма" required/>
+        <input name="date" type="date" required/>
+        <input name="source" placeholder="Источник" required/>
+        <select name="category"><option value="Пособие">Пособие</option><option value="Зарплата">Зарплата</option><option value="Помощь">Помощь</option><option value="Другое">Другое</option><option value="custom">Своя категория…</option></select>
+        <input name="custom" placeholder="Своя категория" style="display:none"/>
+        <button>Добавить</button>
+      </form></section>
+      <section><h2>История</h2><ul id="incList"></ul></section>`;
+    const form=root.querySelector('#incForm'), list=root.querySelector('#incList');
+    form.category.addEventListener('change',e=>form.custom.style.display=e.target.value==='custom'?'block':'none');
+    form.addEventListener('submit',async e=>{e.preventDefault();const {amount,date,source,category,custom}=form.elements;await add('incomes',{amount:+amount.value,date:date.value,source:source.value,category:category.value==='custom'?custom.value:category.value});form.reset();refresh();});
+    async function refresh(){list.innerHTML=(await getAll('incomes')).map(i=>`<li>${i.amount}₽ – ${i.source} (${i.category}, ${i.date})<span class="actions"><button onclick="editIncome(${i.id})">✏</button><button onclick="remove('incomes',${i.id})">✖</button></span></li>`).join('');}
+    refresh();
+  },
+
+  work(root){
+    root.innerHTML=`
+      <nav class="sub">
+        <button data-sub="positions" class="active">Позиции</button>
+        <button data-sub="log">Выработка</button>
+      </nav>
+      <div id="workRoot"></div>`;
+    const sub=root.querySelector('.sub'), wr=root.querySelector('#workRoot');
+    sub.addEventListener('click',e=>{
+      if(!e.target.dataset.sub) return;
+      [...sub.children].forEach(b=>b.classList.remove('active'));
+      e.target.classList.add('active');
+      e.target.dataset.sub==='positions'?positions(wr):log(wr);
+    });
+    positions(wr);
+  }
+};
+
+async function positions(root){
+  root.innerHTML=`
+    <section><h2>Добавить позицию</h2><form id="posForm">
+      <input name="name" placeholder="Название" required/>
+      <input name="holes" type="number" placeholder="Отверстий на 1к" required/>
+      <input name="sets" type="number" placeholder="Комплектов" required/>
+      <input name="price" type="number" placeholder="Цена за 1к" required/>
+      <button>Добавить</button>
+    </form></section>
+    <section><h2>Позиции (А-Я)</h2><ul id="posList"></ul></section>`;
+  const form=root.querySelector('#posForm'), list=root.querySelector('#posList');
+  form.addEventListener('submit',async e=>{e.preventDefault();const {name,holes,sets,price}=form.elements;await add('positions',{name:name.value.trim(),holes:+holes.value,sets:+sets.value,price:+price.value});form.reset();refresh();});
+  async function refresh(){const items=await getAll('positions');items.sort((a,b)=>a.name.localeCompare(b.name));list.innerHTML=items.map(p=>`<li>${p.name} | ${p.holes} отв/1к | ${p.sets} компл | ${p.holes*p.price}₽<span class="actions"><button onclick="editPosition(${p.id})">✏</button><button onclick="remove('positions',${p.id})">✖</button></span></li>`).join('');}
+  refresh();
+}
+
+async function log(root){
+  const y=new Date().getFullYear();
+  root.innerHTML=`
+    <section><h2>Заработок ${y}</h2><canvas id="bar"></canvas><p>Год: ${y}</p></section>
+    <section>
+      <h2>Добавить выработку</h2>
+      <input type="date" id="date"/>
+      <div id="addForm" style="display:none">
+        <select id="pos"></select>
+        <input id="sets" type="number" placeholder="Комплектов" min="1"/>
+        <button id="save">Сохранить</button>
+      </div>
+      <ul id="dayList"></ul>
+      <p id="dayTotal"></p>
+    </section>`;
+  const positions=await getAll('positions');
+  const posSel=root.querySelector('#pos'); posSel.innerHTML=positions.map(p=>`<option value="${p.id}">${p.name}</option>`).join('');
+  const dateSel=root.querySelector('#date'), formDiv=root.querySelector('#addForm'), setsInp=root.querySelector('#sets'), saveBtn=root.querySelector('#save'), dayList=root.querySelector('#dayList'), dayTotal=root.querySelector('#dayTotal');
+  dateSel.addEventListener('change',loadDay);
+  saveBtn.addEventListener('click',async()=>{const posId=+posSel.value, sets=+setsInp.value, pos=positions.find(p=>p.id===posId);await add('worklog',{posId,sets,date:dateSel.value,earned:sets*pos.price});loadDay();refreshBar();});
+  async function loadDay(){const d=dateSel.value;const logs=await getAll('worklog');const filtered=logs.filter(l=>l.date===d);dayList.innerHTML=filtered.map(l=>{const p=positions.find(p=>p.id===l.posId);return`<li>${p.name} | ${p.holes*l.sets} отв | ${l.sets} компл | ${l.earned}₽ (${l.date})<span class="actions"><button onclick="editWorklog(${l.id})">✏</button><button onclick="remove('worklog',${l.id})">✖</button></span></li>`;}).join('');const total=filtered.reduce((a,b)=>a+b.earned,0),totalSets=filtered.reduce((a,b)=>a+b.sets,0),totalHoles=filtered.reduce((a,b)=>{const p=positions.find(p=>p.id===b.posId);return a+p.holes*b.sets;},0);dayTotal.textContent=`Итого: ${totalHoles} отв, ${totalSets} компл, ${total}₽`;formDiv.style.display='block';}
+  async function refreshBar(){const logs=await getAll('worklog');const byMonth=Array(12).fill(0);logs.forEach(l=>{const m=new Date(l.date).getMonth();byMonth[m]+=l.earned});bar(root.querySelector('#bar'),['Янв','Фев','Мар','Апр','Май','Июн','Июл','Авг','Сен','Окт','Ноя','Дек'],byMonth);}
+  loadDay(); refreshBar();
+}
+
+/* ======== Редактирование / удаление ======== */
+window.remove=async (store,id)=>{if(confirm('Удалить?')){await del(store,id);render(document.querySelector('button.active').dataset.tab);}};
+
+/* Редактировать расход */
+window.editExpense=async id=>{
+  const items=await getAll('expenses'), item=items.find(i=>i.id===id);
+  const newAmount=prompt('Новая сумма',item.amount);
+  if(newAmount===null) return;
+  const newTarget=prompt('Новое место',item.target);
+  if(newTarget===null) return;
+  const newCat=prompt('Новая категория',item.category);
+  if(newCat===null) return;
+  await put('expenses',{...item,amount:+newAmount,target:newTarget,category:newCat});
+  render('expenses');
+};
+
+/* Редактировать доход */
+window.editIncome=async id=>{
+  const items=await getAll('incomes'), item=items.find(i=>i.id===id);
+  const newAmount=prompt('Новая сумма',item.amount);
+  if(newAmount===null) return;
+  const newSource=prompt('Новый источник',item.source);
+  if(newSource===null) return;
+  const newCat=prompt('Новая категория',item.category);
+  if(newCat===null) return;
+  await put('incomes',{...item,amount:+newAmount,source:newSource,category:newCat});
+  render('incomes');
+};
+
+/* Редактировать позицию */
+window.editPosition=async id=>{
+  const items=await getAll('positions'), item=items.find(i=>i.id===id);
+  const newName=prompt('Название',item.name); if(newName===null) return;
+  const newHoles=prompt('Отверстий на 1к',item.holes); if(newHoles===null) return;
+  const newSets=prompt('Комплектов',item.sets); if(newSets===null) return;
+  const newPrice=prompt('Цена за 1к',item.price); if(newPrice===null) return;
+  await put('positions',{...item,name:newName,holes:+newHoles,sets:+newSets,price:+newPrice});
+  render('work');
+};
+
+/* Редактировать запись выработки */
+window.editWorklog=async id=>{
+  const logs=await getAll('worklog'), logItem=logs.find(l=>l.id===id);
+  const positions=await getAll('positions');
+  const pos=positions.find(p=>p.id===logItem.posId);
+  const newSets=prompt('Комплектов',logItem.sets); if(newSets===null) return;
+  const newDate=prompt('Дата (YYYY-MM-DD)',logItem.date); if(newDate===null) return;
+  await put('worklog',{...logItem,sets:+newSets,date:newDate,earned:+newSets*pos.price});
+  render('work');
+};
+
+/* старт */
+function render(tab){tabs[tab](document.getElementById('content'));}
+render('home');
+</script>
+</body>
+</html>
